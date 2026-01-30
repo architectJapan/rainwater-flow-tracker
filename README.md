@@ -5,7 +5,7 @@ Google Maps上で起点を指定すると、道路中心線データと標高デ
 
 ## 📖 操作説明書
 以下のリンクから、インストール不要で説明書を閲覧できます。
-**[👉 操作説明書を見る（HTML版）](https://architectJapan.github.io/rainwater-flow-tracker/雨水フロー追跡_説明書.html)**
+**[👉 操作説明書を見る（HTML版）](https://architectJapan.github.io/rainwater-flow-tracker/README.html)**
 
 ---
 
