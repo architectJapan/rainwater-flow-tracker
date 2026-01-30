@@ -1,0 +1,1552 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>雨水フロー追跡（river/waterarea停止 統合版）</title>
+  <style>
+    :root{--bg:#0b1020;--panel:#0f1730;--fg:#e6e9ff;--muted:#9aa3c7;--accent:#5b8cff;--danger:#ff5b5b;--ok:#4ade80;--warn:#fbbf24;}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Hiragino Kaku Gothic ProN","Meiryo",sans-serif;background:var(--bg);color:var(--fg)}
+    #app{display:flex;height:100%}
+    #side{width:360px;max-width:92vw;background:var(--panel);border-right:1px solid rgba(255,255,255,.08);overflow:auto}
+    #mapWrap{flex:1;min-width:0;position:relative}
+    #map{position:absolute;inset:0}
+    .pad{padding:12px 12px 16px}
+    .row{display:flex;gap:8px;align-items:center}
+    .row>label{flex:1;color:var(--muted);font-size:12px}
+    .row>input,.row>select{flex:1;background:#0b132b;border:1px solid rgba(255,255,255,.12);color:var(--fg);border-radius:10px;padding:8px 10px;font-size:13px}
+    .row>input[type="number"]{text-align:right}
+    .hr{height:1px;background:rgba(255,255,255,.08);margin:12px 0}
+    .btn{background:#16244d;border:1px solid rgba(255,255,255,.14);color:var(--fg);border-radius:12px;padding:10px 12px;font-size:13px;cursor:pointer}
+    .btn:hover{filter:brightness(1.1)}
+    .btn.primary{background:linear-gradient(180deg,#2b58ff,#1e3fff);border:none}
+    .btn.danger{background:#3a1020;border:1px solid rgba(255,91,91,.45);color:#ffdede}
+    .btn:disabled{opacity:.45;cursor:not-allowed}
+    .chip{font-size:11px;color:var(--muted);border:1px solid rgba(255,255,255,.14);padding:4px 8px;border-radius:999px}
+    .title{font-weight:700;font-size:14px;letter-spacing:.2px}
+    .sub{color:var(--muted);font-size:12px;margin-top:2px}
+    #log{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.35;background:#070b15;border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:10px;min-height:240px}
+    .hint{color:var(--muted);font-size:12px}
+    .small{font-size:11px;color:var(--muted)}
+    .seg{display:flex;gap:8px;flex-wrap:wrap}
+
+    /* 計算中オーバーレイ */
+    #busyOverlay{
+      position:absolute; inset:12px auto auto 12px;
+      background:rgba(10,14,28,.82);
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:14px;
+      padding:10px 12px;
+      display:none;
+      align-items:center;
+      gap:10px;
+      z-index:10;
+      backdrop-filter: blur(6px);
+    }
+    #busyOverlay .spin{
+      width:16px;height:16px;border-radius:50%;
+      border:2px solid rgba(255,255,255,.25);
+      border-top-color: rgba(255,255,255,.9);
+      animation: spin 1s linear infinite;
+    }
+    #busyOverlay .txt{font-size:12px;color:var(--fg)}
+    #busyOverlay .subtxt{font-size:11px;color:var(--muted);margin-top:2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* 地図ロード/エラー用オーバーレイ（無限読込対策） */
+    #mapOverlay{
+      position:absolute; inset:0;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.55);
+      z-index:20;
+      padding:16px;
+      box-sizing:border-box;
+    }
+    #mapOverlay.hidden{ display:none; }
+    #mapOverlay .box{
+      max-width: 680px;
+      background:rgba(7,11,21,.92);
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:16px;
+      padding:14px 16px;
+      backdrop-filter: blur(6px);
+    }
+    #mapOverlay .ttl{ font-weight:700; font-size:13px; margin-bottom:8px; }
+    #mapOverlay .txt{ font-size:12px; color:var(--fg); line-height:1.55; white-space:pre-wrap; }
+    #mapOverlay .muted{ color:var(--muted); font-size:11px; margin-top:8px; white-space:pre-wrap; }
+  </style>
+
+  <script>
+    // ★ここに直埋め（あなたのAPIキーに置換）
+    // Cloudflare Pages運用時：HTTPリファラ許可に https://xxx-xxx.pages.dev/* を追加
+    window.GMAPS_API_KEY = "ここにあなたのGoogle Maps APIキーを入れる"; // ←あなたのキー
+  </script>
+</head>
+
+<body>
+<div id="app">
+  <div id="side">
+    <div class="pad">
+      <div class="title">雨水フロー追跡（統合版）</div>
+      <div class="sub">起点即表示 → 計算 → 経路＋終点表示／river誤停止を waterarea gate で抑制</div>
+
+      <div class="hr"></div>
+      <div class="row">
+        <label>地図状態</label>
+        <span class="chip" id="mapState">起動中...</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>計算状態</label>
+        <span class="chip" id="calcState">待機中</span>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="seg">
+        <button class="btn primary" id="btnArm" disabled>起点クリック→経路計算</button>
+        <button class="btn" id="btnClear" disabled>クリア</button>
+        <button class="btn danger" id="btnStop" disabled>停止</button>
+      </div>
+      <div class="hint" style="margin-top:6px">手順：①地図読み込み → ②「起点クリック→経路計算」 → ③地図をタップ（起点は即表示）</div>
+
+      <div class="hr"></div>
+
+      <div class="title" style="font-size:13px">パラメータ</div>
+
+      <div class="row" style="margin-top:10px">
+        <label>道路/河川タイル半径（初期）</label>
+        <input id="tileRadius" type="number" value="1" min="0" max="6" step="1" />
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>道路/河川タイル半径（最大）</label>
+        <input id="maxTileRadius" type="number" value="3" min="0" max="10" step="1" />
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>水域PBFズーム（water）</label>
+        <input id="waterZ" type="number" value="14" min="4" max="16" step="1" />
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>水域レイヤー</label>
+        <select id="waterLayer">
+          <option value="waterarea" selected>waterarea（水面ポリゴン）</option>
+          <option value="river">river</option>
+          <option value="lake">lake</option>
+          <option value="coastline">coastline</option>
+        </select>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>水域停止距離（m）</label>
+        <input id="waterSnapM" type="number" value="0" min="0" max="50" step="1" />
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <label>河川近接距離（m）</label>
+        <input id="riverSnapM" type="number" value="30" min="0" max="200" step="1" />
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <label>河川停止ゲート（水域近傍m）</label>
+        <input id="riverGateWaterM" type="number" value="20" min="0" max="200" step="1" />
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>上り罰則（標高差×係数）</label>
+        <input id="uphillPenalty" type="number" value="15" min="0" max="200" step="1" />
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>最大ステップ数</label>
+        <input id="maxSteps" type="number" value="2000" min="50" max="20000" step="50" />
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>停止モード</label>
+        <select id="stopMode">
+          <option value="auto" selected>auto（推奨：水域優先＋河川はゲート付き）</option>
+          <option value="waterOnly">水域面のみ（waterareaのみ）</option>
+          <option value="riverOnly">河川中心線のみ（rvrcl）</option>
+        </select>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>水域デバッグ描画</label>
+        <select id="waterDbg">
+          <option value="OFF" selected>OFF</option>
+          <option value="POLY">POLY（水域面）</option>
+          <option value="BBOX">BBOX（候補枠）</option>
+        </select>
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <label>水域デバッグ半径（m）</label>
+        <input id="waterDbgRadiusM" type="number" value="800" min="0" max="5000" step="50" />
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <label>水域デバッグ最大描画数</label>
+        <input id="waterDbgMaxDraw" type="number" value="200" min="0" max="2000" step="10" />
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <label>水域ログ</label>
+        <select id="waterLog">
+          <option value="stopOnly" selected>止点のみ詳細</option>
+          <option value="all">毎ステップ</option>
+          <option value="off">OFF</option>
+        </select>
+      </div>
+
+      <div class="hr"></div>
+      <div class="title" style="font-size:13px">ログ</div>
+      <div id="log"></div>
+
+      <div class="hr"></div>
+      <div class="small">
+        ※1HTMLのため外部ロード：Google Maps / esm.sh（VectorTile decode）<br/>
+        ※停止仕様：river近接は waterarea 近傍（ゲート）時のみ停止可
+      </div>
+    </div>
+  </div>
+
+  <div id="mapWrap">
+    <div id="mapOverlay">
+      <div class="box">
+        <div class="ttl" id="ovTtl">地図を読み込み中…</div>
+        <div class="txt" id="ovTxt">Google Maps を初期化しています。長く止まる場合は左ログに出るエラー名（RefererNotAllowedMapError / BillingNotEnabledMapError 等）を確認してください。</div>
+        <div class="muted" id="ovHint">Network: maps/api/js が 200 か／Console: Google Maps JavaScript API error: xxxx</div>
+      </div>
+    </div>
+
+    <div id="busyOverlay">
+      <div class="spin"></div>
+      <div>
+        <div class="txt" id="busyText">計算中…</div>
+        <div class="subtxt" id="busySub">タイル取得・グラフ構築中</div>
+      </div>
+    </div>
+
+    <div id="map"></div>
+  </div>
+</div>
+
+<script>
+  // -------------------------
+  // 共通UI（ログ／状態）
+  // -------------------------
+  const $ = (id)=>document.getElementById(id);
+
+  function nowTime(){ return new Date().toLocaleTimeString("ja-JP",{hour12:false}); }
+
+  function setMapState(txt){ const el=$("mapState"); if(el) el.textContent = txt; }
+  function setCalcState(txt){ const el=$("calcState"); if(el) el.textContent = txt; }
+
+  function showOverlay(on, ttl, txt, hint){
+    const ov = $("mapOverlay");
+    if(!ov) return;
+    if(on){
+      ov.classList.remove("hidden");
+      $("ovTtl").textContent = ttl || "地図を読み込み中…";
+      $("ovTxt").textContent = txt || "";
+      $("ovHint").textContent = hint || "";
+    }else{
+      ov.classList.add("hidden");
+    }
+  }
+
+  // Console/Network を見れない端末向け：画面ログ
+  window.__appendLog = (msg)=>{
+    const el = $("log");
+    if(el){
+      el.textContent += msg + "\n";
+      el.scrollTop = el.scrollHeight;
+    }
+  };
+  function log(msg){ window.__appendLog(`[${nowTime()}] ${msg}`); }
+
+  // -------------------------
+  // Google Maps：無限読込対策（エラー捕捉）
+  // -------------------------
+  function detectGoogleErrorOverlayText(){
+    const t = $("map")?.innerText || "";
+    if(t.includes("このページでは") && t.includes("Google") && t.includes("読み込まれませんでした")) return true;
+    if(t.includes("For development purposes only")) return true;
+    if(t.includes("This page") && t.includes("Google Maps")) return true;
+    return false;
+  }
+
+  // Consoleに出る "Google Maps JavaScript API error:" を画面ログへ転写
+  (function hookConsoleForMapsError(){
+    const origErr = console.error.bind(console);
+    const origWarn = console.warn.bind(console);
+    const tap = (line)=>{
+      const s = String(line||"");
+      if(!s.includes("Google Maps JavaScript API error:")) return;
+
+      log(s);
+      setMapState("NG（Googleエラー）");
+      showOverlay(true, "Google Maps エラー", s + "\n\n候補：\n・HTTPリファラ許可（https://xxx-xxx.pages.dev/*）\n・Billing（課金）有効化\n・Maps JavaScript API 有効化\n・広告ブロッカー/ネットワーク遮断", "Consoleのエラー名に従ってGoogle Cloud側を修正してください。");
+    };
+
+    console.error = (...args)=>{ try{ tap(args.map(String).join(" ")); }catch(_){ } origErr(...args); };
+    console.warn  = (...args)=>{ try{ tap(args.map(String).join(" ")); }catch(_){ } origWarn(...args); };
+
+    window.addEventListener("unhandledrejection", (e)=> log("unhandledrejection: " + (e.reason?.message || e.reason || "")));
+  })();
+
+  // 認証失敗フック（キー/リファラ/課金）
+  window.gm_authFailure = function(){
+    log("gm_authFailure: 認証失敗（キー/リファラ/課金/API有効化を確認）");
+    setMapState("NG（認証失敗）");
+    showOverlay(true, "認証に失敗しました", "gm_authFailure が発生しました。\n候補：\n・HTTPリファラ未許可\n・Billing未有効\n・Maps JavaScript API未有効\n・キーが別プロジェクト/無効", "Google Cloud Console の APIキー制限を見直してください。");
+  };
+
+  // Google Maps API を動的ロード（callbackが返らなくても落ちない）
+  function loadGoogleMaps(apiKey){
+    return new Promise((resolve,reject)=>{
+      if(window.google && window.google.maps){ resolve(); return; }
+
+      const existing = document.querySelector('script[data-gmaps-loader="1"]');
+      if(existing){
+        const t0 = Date.now();
+        const timer = setInterval(()=>{
+          if(window.google && window.google.maps){
+            clearInterval(timer); resolve();
+          }else if(Date.now()-t0 > 15000){
+            clearInterval(timer);
+            reject(new Error("Google Maps API 読み込みタイムアウト（15秒）"));
+          }
+        }, 250);
+        return;
+      }
+
+      const cb = "__gmcb_" + Math.random().toString(16).slice(2);
+      let done = false;
+
+      const timeoutId = setTimeout(()=>{
+        if(done) return;
+        done = true;
+        try{ delete window[cb]; }catch(_){}
+        if(window.google && window.google.maps){ resolve(); return; }
+        reject(new Error("Google Maps API 読み込みタイムアウト（15秒）"));
+      }, 15000);
+
+      window[cb] = ()=>{
+        if(done) return;
+        done = true;
+        clearTimeout(timeoutId);
+        try{ delete window[cb]; }catch(_){}
+        resolve();
+      };
+
+      const s = document.createElement("script");
+      s.setAttribute("data-gmaps-loader","1");
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&callback=${cb}&v=weekly`;
+      s.async = true;
+      s.defer = true;
+      s.crossOrigin = "anonymous";
+
+      s.onload = ()=>{
+        setTimeout(()=>{
+          if(done) return;
+          if(window.google && window.google.maps){
+            done = true;
+            clearTimeout(timeoutId);
+            try{ delete window[cb]; }catch(_){}
+            resolve();
+          }
+        }, 0);
+      };
+
+      s.onerror = ()=>{
+        if(done) return;
+        done = true;
+        clearTimeout(timeoutId);
+        try{ delete window[cb]; }catch(_){}
+        reject(new Error("Google Maps API 読み込み失敗（ネットワーク/ブロッカー/キー不正）"));
+      };
+
+      document.head.appendChild(s);
+    });
+  }
+
+  // file:// 直開きで module が死ぬ検知（Pagesでは基本OK）
+  window.__MODULE_ALIVE = false;
+  document.addEventListener("DOMContentLoaded", ()=>{
+    setMapState("起動中...");
+    setCalcState("待機中");
+    log("起動: " + location.href);
+    setTimeout(()=>{
+      if(!window.__MODULE_ALIVE){
+        setMapState("NG");
+        showOverlay(true, "モジュールが起動していません", "iPhoneの file:// 直開きでは外部importがブロックされることがあります。\nCloudflare Pages の https URL で開いてください。", "");
+        log("エラー: module未起動（file://直開きの可能性）");
+      }
+    }, 1500);
+  });
+</script>
+
+<script type="module">
+  window.__MODULE_ALIVE = true;
+
+  // -------------------------
+  // MVTデコード依存（esm.sh）
+  // -------------------------
+  let Pbf = null;
+  let VectorTile = null;
+  async function loadMvtDeps(){
+    if(Pbf && VectorTile) return true;
+    try{
+      const modPbf = await import("https://esm.sh/pbf@3.2.1");
+      const modVt  = await import("https://esm.sh/@mapbox/vector-tile@2.0.4");
+      Pbf = modPbf.default;
+      VectorTile = modVt.VectorTile;
+      return true;
+    }catch(err){
+      setMapState("NG");
+      showOverlay(true, "依存モジュールが読めません", "esm.sh（PBF/VectorTile）のimportに失敗しました。\n候補：\n・広告ブロッカー\n・社内ネットワーク制限\n・CORS/HTTPS混在\n\nCloudflare Pages の https で開いているか確認してください。", "");
+      log("エラー: 依存モジュール(esm.sh) 読込失敗");
+      console.error(err);
+      return false;
+    }
+  }
+
+  // -------------------------
+  // UI / 状態
+  // -------------------------
+  const logEl = $("log");
+  const mapStateEl = $("mapState");
+  const calcStateEl = $("calcState");
+  const btnArm = $("btnArm");
+  const btnClear = $("btnClear");
+  const btnStop = $("btnStop");
+  const busyOverlay = $("busyOverlay");
+  const busyText = $("busyText");
+  const busySub  = $("busySub");
+
+  const st = {
+    map: null,
+    mapLoaded: false,
+    armed: false,
+    computing: false,
+    startMarker: null,
+    endMarker: null,
+    polyline: null,
+    dbgPolys: [],
+    dbgBBoxes: [],
+    stopRequested: false,
+    lastStart: null,
+  };
+
+  function clearLog(){ logEl.textContent=""; }
+  function logH(msg){ log(`\n=== ${msg} ===`); }
+
+  function setBusy(on, title="計算中…", sub="タイル取得・グラフ構築中"){
+    busyText.textContent = title;
+    busySub.textContent = sub;
+    busyOverlay.style.display = on ? "flex" : "none";
+    st.computing = on;
+
+    // UIロック
+    btnArm.disabled = on || !st.mapLoaded;
+    btnClear.disabled = on || !st.mapLoaded;
+    btnStop.disabled = !st.mapLoaded; // stopは計算中も押せる
+    setCalcState(on ? "計算中…" : "待機中");
+  }
+
+  function readOpts(){
+    return {
+      tileRadius: clampInt($("tileRadius").value,0,20),
+      maxTileRadius: clampInt($("maxTileRadius").value,0,30),
+      waterZ: clampInt($("waterZ").value,4,16),
+      waterLayer: $("waterLayer").value,
+      waterSnapM: clampNum($("waterSnapM").value,0,5000),
+      riverSnapM: clampNum($("riverSnapM").value,0,5000),
+      riverGateWaterM: clampNum($("riverGateWaterM").value,0,5000),
+      uphillPenalty: clampNum($("uphillPenalty").value,0,9999),
+      maxSteps: clampInt($("maxSteps").value,10,999999),
+      stopMode: $("stopMode").value,
+      waterDbg: $("waterDbg").value,
+      waterDbgRadiusM: clampNum($("waterDbgRadiusM").value,0,999999),
+      waterDbgMaxDraw: clampInt($("waterDbgMaxDraw").value,0,999999),
+      waterLog: $("waterLog").value,
+    };
+  }
+  function clampInt(v,min,max){ const n = Math.trunc(Number(v)); return isFinite(n)?Math.max(min,Math.min(max,n)):min; }
+  function clampNum(v,min,max){ const n = Number(v); return isFinite(n)?Math.max(min,Math.min(max,n)):min; }
+
+  // -------------------------
+  // WebMercator 変換
+  // -------------------------
+  const R = 6378137;
+  const DEG = Math.PI/180;
+
+  function ll2m(lon,lat){
+    const x = R * lon*DEG;
+    const y = R * Math.log(Math.tan(Math.PI/4 + (lat*DEG)/2));
+    return {x,y};
+  }
+  function m2ll(x,y){
+    const lon = (x/R)/DEG;
+    const lat = (2*Math.atan(Math.exp(y/R)) - Math.PI/2)/DEG;
+    return {lon,lat};
+  }
+  function haversineM(a,b){
+    const dLat = (b.lat-a.lat)*DEG;
+    const dLon = (b.lon-a.lon)*DEG;
+    const sa = Math.sin(dLat/2), sb = Math.sin(dLon/2);
+    const A = sa*sa + Math.cos(a.lat*DEG)*Math.cos(b.lat*DEG)*sb*sb;
+    return 2*R*Math.asin(Math.min(1,Math.sqrt(A)));
+  }
+
+  // -------------------------
+  // タイル座標（XYZ）
+  // -------------------------
+  function lon2tileX(lon,z){ return Math.floor((lon+180)/360*Math.pow(2,z)); }
+  function lat2tileY(lat,z){
+    const rad = lat*DEG;
+    return Math.floor((1 - Math.log(Math.tan(rad)+1/Math.cos(rad))/Math.PI)/2 * Math.pow(2,z));
+  }
+  function tile2lon(x,z){ return x/Math.pow(2,z)*360 - 180; }
+  function tile2lat(y,z){
+    const n = Math.PI - 2*Math.PI*y/Math.pow(2,z);
+    return (Math.atan(0.5*(Math.exp(n)-Math.exp(-n))))/DEG;
+  }
+
+  // -------------------------
+  // fetch キュー（同時数制限）
+  // -------------------------
+  class FetchQueue{
+    constructor(limit=6){ this.limit=limit; this.active=0; this.q=[]; }
+    push(fn){
+      return new Promise((resolve,reject)=>{
+        this.q.push({fn,resolve,reject});
+        this._kick();
+      });
+    }
+    _kick(){
+      while(this.active < this.limit && this.q.length){
+        const t = this.q.shift();
+        this.active++;
+        Promise.resolve()
+          .then(()=>t.fn())
+          .then((v)=>t.resolve(v),(e)=>t.reject(e))
+          .finally(()=>{ this.active--; this._kick(); });
+      }
+    }
+  }
+  const fq = new FetchQueue(8);
+
+  // -------------------------
+  // 標高（PNG標高タイル）取得
+  // -------------------------
+  const elevCache = new Map(); // url -> ImageData
+  async function fetchPngImageData(url){
+    if(elevCache.has(url)) return elevCache.get(url);
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    const blob = await res.blob();
+    const img = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = 256; canvas.height = 256;
+    const ctx = canvas.getContext("2d",{willReadFrequently:true});
+    ctx.drawImage(img,0,0);
+    const id = ctx.getImageData(0,0,256,256);
+    elevCache.set(url,id);
+    return id;
+  }
+  function rgbToHeight(r,g,b){
+    const x = (r<<16) + (g<<8) + b;
+    if(x === (1<<23)) return null;
+    const u = 0.01;
+    if(x < (1<<23)) return x*u;
+    return (x - (1<<24))*u;
+  }
+  async function getElevation(lon,lat){
+    const order = ["dem1a_png","dem5a_png","dem5b_png","dem5c_png","dem10b_png"];
+    const zs = [15,14];
+    for(const z of zs){
+      const tx = lon2tileX(lon,z);
+      const ty = lat2tileY(lat,z);
+      const lon0 = tile2lon(tx,z), lon1 = tile2lon(tx+1,z);
+      const lat0 = tile2lat(ty,z), lat1 = tile2lat(ty+1,z);
+      const px = Math.floor((lon - lon0)/(lon1-lon0)*256);
+      const py = Math.floor((lat0 - lat)/(lat0-lat1)*256);
+      const ix = Math.max(0,Math.min(255,px));
+      const iy = Math.max(0,Math.min(255,py));
+      for(const layer of order){
+        const url = `https://cyberjapandata.gsi.go.jp/xyz/${layer}/${z}/${tx}/${ty}.png`;
+        const id = await fq.push(()=>fetchPngImageData(url));
+        if(!id) continue;
+        const i = (iy*256+ix)*4;
+        const r = id.data[i], g = id.data[i+1], b = id.data[i+2];
+        if(r===128 && g===0 && b===0) continue;
+        const h = rgbToHeight(r,g,b);
+        if(h==null) continue;
+        return h;
+      }
+    }
+    return null;
+  }
+  const elevMemo = new Map(); // quantized lon/lat -> h
+  async function elevCached(lon,lat){
+    const k = `${Math.round(lon*1e6)}_${Math.round(lat*1e6)}`;
+    if(elevMemo.has(k)) return elevMemo.get(k);
+    const h = await getElevation(lon,lat);
+    elevMemo.set(k,h);
+    return h;
+  }
+
+  // -------------------------
+  // GeoJSON タイル（rdcl / rvrcl）
+  // -------------------------
+  async function fetchGeoJSON(url){
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    return await res.json();
+  }
+
+  // -------------------------
+  // MVT(PBF) タイル（experimental_bvmap）
+  // -------------------------
+  async function fetchArrayBuffer(url){
+    const res = await fetch(url);
+    if(!res.ok) return null;
+    return await res.arrayBuffer();
+  }
+  function tileXYToLonLat(z,x,y,px,py,extent){
+    const fx = x + (px/extent);
+    const fy = y + (py/extent);
+    const lon = tile2lon(fx,z);
+    const lat = tile2lat(fy,z);
+    return {lon,lat};
+  }
+
+  // -------------------------
+  // 簡易空間インデックス（グリッド）
+  // -------------------------
+  class GridIndex{
+    constructor(cellM=200){
+      this.cellM = cellM;
+      this.map = new Map();
+      this.items = [];
+    }
+    _cellKey(cx,cy){ return `${cx},${cy}`; }
+    _bboxToCells(b){
+      const cs = this.cellM;
+      const minCx = Math.floor(b.minx/cs), maxCx = Math.floor(b.maxx/cs);
+      const minCy = Math.floor(b.miny/cs), maxCy = Math.floor(b.maxy/cs);
+      const keys = [];
+      for(let cx=minCx; cx<=maxCx; cx++){
+        for(let cy=minCy; cy<=maxCy; cy++){
+          keys.push(this._cellKey(cx,cy));
+        }
+      }
+      return keys;
+    }
+    insert(bbox,payload){
+      const id = this.items.length;
+      this.items.push({bbox,payload});
+      for(const k of this._bboxToCells(bbox)){
+        const arr = this.map.get(k) || [];
+        arr.push(id);
+        this.map.set(k,arr);
+      }
+      return id;
+    }
+    queryBBox(q){
+      const cs = this.cellM;
+      const minCx = Math.floor(q.minx/cs), maxCx = Math.floor(q.maxx/cs);
+      const minCy = Math.floor(q.miny/cs), maxCy = Math.floor(q.maxy/cs);
+      const seen = new Set();
+      const out = [];
+      for(let cx=minCx; cx<=maxCx; cx++){
+        for(let cy=minCy; cy<=maxCy; cy++){
+          const k = this._cellKey(cx,cy);
+          const arr = this.map.get(k);
+          if(!arr) continue;
+          for(const id of arr){
+            if(seen.has(id)) continue;
+            seen.add(id);
+            const it = this.items[id];
+            if(it.bbox.maxx < q.minx || it.bbox.minx > q.maxx || it.bbox.maxy < q.miny || it.bbox.miny > q.maxy) continue;
+            out.push(it);
+          }
+        }
+      }
+      return out;
+    }
+  }
+
+  // -------------------------
+  // 幾何
+  // -------------------------
+  function bboxOfPoints(pts){
+    let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
+    for(const p of pts){
+      if(p.x<minx)minx=p.x;
+      if(p.y<miny)miny=p.y;
+      if(p.x>maxx)maxx=p.x;
+      if(p.y>maxy)maxy=p.y;
+    }
+    return {minx,miny,maxx,maxy};
+  }
+  function pointInRing(p, ring){
+    let inside=false;
+    for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+      const xi=ring[i].x, yi=ring[i].y;
+      const xj=ring[j].x, yj=ring[j].y;
+      const intersect = ((yi>p.y)!==(yj>p.y)) && (p.x < (xj-xi)*(p.y-yi)/(yj-yi+1e-12)+xi);
+      if(intersect) inside=!inside;
+    }
+    return inside;
+  }
+  function distPointToSeg(p,a,b){
+    const vx=b.x-a.x, vy=b.y-a.y;
+    const wx=p.x-a.x, wy=p.y-a.y;
+    const c1 = vx*wx + vy*wy;
+    if(c1<=0) return Math.hypot(p.x-a.x,p.y-a.y);
+    const c2 = vx*vx + vy*vy;
+    if(c2<=c1) return Math.hypot(p.x-b.x,p.y-b.y);
+    const t = c1/c2;
+    const px=a.x+t*vx, py=a.y+t*vy;
+    return Math.hypot(p.x-px,p.y-py);
+  }
+  function minDistPointToRingEdges(p,ring){
+    let d=Infinity;
+    for(let i=1;i<ring.length;i++){
+      d = Math.min(d, distPointToSeg(p, ring[i-1], ring[i]));
+    }
+    if(ring.length>2) d = Math.min(d, distPointToSeg(p, ring[ring.length-1], ring[0]));
+    return d;
+  }
+  function segIntersect(a,b,c,d){
+    const r = {x:b.x-a.x, y:b.y-a.y};
+    const s = {x:d.x-c.x, y:d.y-c.y};
+    const denom = r.x*s.y - r.y*s.x;
+    if(Math.abs(denom) < 1e-12) return null;
+    const uNum = (c.x-a.x)*r.y - (c.y-a.y)*r.x;
+    const tNum = (c.x-a.x)*s.y - (c.y-a.y)*s.x;
+    const t = tNum/denom;
+    const u = uNum/denom;
+    if(t>=0 && t<=1 && u>=0 && u<=1){
+      return {x:a.x + t*r.x, y:a.y + t*r.y, t, u};
+    }
+    return null;
+  }
+
+  // -------------------------
+  // WaterIndex（waterarea等のポリゴン保持）
+  // -------------------------
+  class WaterIndex{
+    constructor(){
+      this.tileCache = new Map();
+      this.loadedTiles = 0;
+      this.loadedPolys = 0;
+      this.fetchOk = 0;
+      this.fetchFail = 0;
+      this.decodeOk = 0;
+      this.decodeFail = 0;
+      this.bytes = 0;
+    }
+    _key(z,x,y,layer){ return `${z}/${x}/${y}/${layer}`; }
+
+    async ensureTilesAround(lon,lat,z,radius,layer){
+      const tx = lon2tileX(lon,z), ty = lat2tileY(lat,z);
+      const tasks = [];
+      for(let dx=-radius; dx<=radius; dx++){
+        for(let dy=-radius; dy<=radius; dy++){
+          const x = tx+dx, y=ty+dy;
+          tasks.push(this._loadTile(z,x,y,layer));
+        }
+      }
+      await Promise.all(tasks);
+    }
+
+    async _loadTile(z,x,y,layer){
+      const k = this._key(z,x,y,layer);
+      if(this.tileCache.has(k)) return this.tileCache.get(k);
+
+      const url = `https://cyberjapandata.gsi.go.jp/xyz/experimental_bvmap/${z}/${x}/${y}.pbf`;
+      let buf=null;
+      try{
+        buf = await fq.push(()=>fetchArrayBuffer(url));
+        if(!buf){ this.fetchFail++; this.tileCache.set(k,null); return null; }
+        this.fetchOk++;
+        this.bytes += buf.byteLength;
+      }catch(_){
+        this.fetchFail++;
+        this.tileCache.set(k,null);
+        return null;
+      }
+
+      try{
+        const vt = new VectorTile(new Pbf(new Uint8Array(buf)));
+        const lyr = vt.layers[layer];
+        if(!lyr){ this.decodeFail++; this.tileCache.set(k,{polys:[], grid:new GridIndex(250)}); return this.tileCache.get(k); }
+
+        const polys = [];
+        const grid = new GridIndex(250);
+        const extent = lyr.extent || 4096;
+
+        for(let i=0;i<lyr.length;i++){
+          const f = lyr.feature(i);
+          if(f.type !== 3) continue;
+          const geom = f.loadGeometry();
+          if(!geom || !geom.length) continue;
+
+          const outerRing = geom[0].map(pt=>{
+            const ll = tileXYToLonLat(z,x,y,pt.x,pt.y,extent);
+            return ll2m(ll.lon,ll.lat);
+          });
+
+          const holes = [];
+          for(let r=1;r<geom.length;r++){
+            const hole = geom[r].map(pt=>{
+              const ll = tileXYToLonLat(z,x,y,pt.x,pt.y,extent);
+              return ll2m(ll.lon,ll.lat);
+            });
+            holes.push(hole);
+          }
+
+          const bbox = bboxOfPoints(outerRing);
+          grid.insert(bbox,{outer:outerRing,holes});
+          polys.push({outer:outerRing,holes,bbox});
+        }
+
+        this.decodeOk++;
+        this.loadedTiles++;
+        this.loadedPolys += polys.length;
+
+        const pack = {polys, grid, z, x, y, layer};
+        this.tileCache.set(k, pack);
+        return pack;
+      }catch(_){
+        this.decodeFail++;
+        this.tileCache.set(k,null);
+        return null;
+      }
+    }
+
+    containsOrNear(lon,lat,searchR){
+      const p = ll2m(lon,lat);
+      const q = {minx:p.x-searchR, miny:p.y-searchR, maxx:p.x+searchR, maxy:p.y+searchR};
+      let best = {hit:false, dist:Infinity, poly:null};
+
+      for(const v of this.tileCache.values()){
+        if(!v || !v.grid) continue;
+        const cands = v.grid.queryBBox(q);
+        for(const it of cands){
+          const poly = it.payload;
+
+          const insideOuter = pointInRing(p, poly.outer);
+          if(insideOuter){
+            let insideHole=false;
+            for(const h of poly.holes){
+              if(pointInRing(p,h)){ insideHole=true; break; }
+            }
+            if(!insideHole){
+              if(0 < best.dist) best = {hit:true, dist:0, poly};
+              continue;
+            }
+          }
+
+          const d = minDistPointToRingEdges(p, poly.outer);
+          if(d < best.dist) best = {hit:false, dist:d, poly};
+        }
+      }
+
+      if(best.dist === Infinity) return {hit:false, dist:Infinity, poly:null};
+      return best;
+    }
+
+    distanceToWater(lon,lat,searchR){
+      const r = this.containsOrNear(lon,lat,searchR);
+      return r.hit ? 0 : r.dist;
+    }
+  }
+
+  // -------------------------
+  // LineIndex（rdcl/rvrcl用：線分）
+  // -------------------------
+  class LineIndex{
+    constructor(cellM=200){
+      this.grid = new GridIndex(cellM);
+      this.segs = [];
+      this.tileCache = new Set();
+      this.fetchOk=0; this.fetchFail=0;
+      this.loadedTiles=0; this.loadedSegs=0;
+    }
+    _segBbox(a,b){
+      return {minx:Math.min(a.x,b.x), miny:Math.min(a.y,b.y), maxx:Math.max(a.x,b.x), maxy:Math.max(a.y,b.y)};
+    }
+    addLine(coordsLL){
+      for(let i=1;i<coordsLL.length;i++){
+        const m0 = ll2m(coordsLL[i-1][0], coordsLL[i-1][1]);
+        const m1 = ll2m(coordsLL[i][0], coordsLL[i][1]);
+        const bbox = this._segBbox(m0,m1);
+        this.segs.push({a:m0,b:m1,bbox});
+        this.grid.insert(bbox, this.segs.length-1);
+      }
+    }
+    nearestDistance(lon,lat,marginM){
+      const p = ll2m(lon,lat);
+      const q = {minx:p.x-marginM, miny:p.y-marginM, maxx:p.x+marginM, maxy:p.y+marginM};
+      const cands = this.grid.queryBBox(q);
+      let best = Infinity;
+      for(const it of cands){
+        const seg = this.segs[it.payload];
+        const d = distPointToSeg(p, seg.a, seg.b);
+        if(d < best) best = d;
+      }
+      return best;
+    }
+    intersectSegment(p0LL,p1LL,marginM){
+      const a = ll2m(p0LL.lon,p0LL.lat);
+      const b = ll2m(p1LL.lon,p1LL.lat);
+      const q = {minx:Math.min(a.x,b.x)-marginM, miny:Math.min(a.y,b.y)-marginM, maxx:Math.max(a.x,b.x)+marginM, maxy:Math.max(a.y,b.y)+marginM};
+      const cands = this.grid.queryBBox(q);
+      let best = null;
+      for(const it of cands){
+        const seg = this.segs[it.payload];
+        const hit = segIntersect(a,b,seg.a,seg.b);
+        if(hit && (!best || hit.t < best.t)) best = hit;
+      }
+      return best;
+    }
+    async ensureTilesAround(lon,lat,z,radius,layerName){
+      const tx = lon2tileX(lon,z), ty = lat2tileY(lat,z);
+      const tasks = [];
+      for(let dx=-radius; dx<=radius; dx++){
+        for(let dy=-radius; dy<=radius; dy++){
+          tasks.push(this._loadTile(z,tx+dx,ty+dy,layerName));
+        }
+      }
+      await Promise.all(tasks);
+    }
+    async _loadTile(z,x,y,layerName){
+      const k = `${layerName}/${z}/${x}/${y}`;
+      if(this.tileCache.has(k)) return;
+      this.tileCache.add(k);
+      const url = `https://cyberjapandata.gsi.go.jp/xyz/${layerName}/${z}/${x}/${y}.geojson`;
+      const js = await fq.push(()=>fetchGeoJSON(url));
+      if(!js){ this.fetchFail++; return; }
+      this.fetchOk++;
+      this.loadedTiles++;
+      if(!js.features) return;
+
+      for(const f of js.features){
+        const g = f.geometry;
+        if(!g) continue;
+        if(g.type==="LineString"){
+          this.addLine(g.coordinates);
+        }else if(g.type==="MultiLineString"){
+          for(const ls of g.coordinates) this.addLine(ls);
+        }
+      }
+      this.loadedSegs = this.segs.length;
+    }
+  }
+
+  // -------------------------
+  // RoadGraph（rdclからノード・エッジ生成）
+  // -------------------------
+  class RoadGraph{
+    constructor(){
+      this.nodes = [];
+      this.nodeKey = new Map();
+      this.adj = [];
+    }
+    _keyFromM(p){
+      const qx = Math.round(p.x*2);
+      const qy = Math.round(p.y*2);
+      return `${qx}_${qy}`;
+    }
+    addNodeFromLL(lon,lat){
+      const m = ll2m(lon,lat);
+      const k = this._keyFromM(m);
+      const ex = this.nodeKey.get(k);
+      if(ex!=null) return ex;
+      const idx = this.nodes.length;
+      this.nodes.push({x:m.x,y:m.y,lon,lat});
+      this.nodeKey.set(k,idx);
+      this.adj.push([]);
+      return idx;
+    }
+    addEdge(i,j,lenM){
+      this.adj[i].push({to:j,lenM});
+      this.adj[j].push({to:i,lenM});
+    }
+  }
+  function buildRoadGraphFromLineIndex(lineIdx){
+    const g = new RoadGraph();
+    for(const seg of lineIdx.segs){
+      const aLL = m2ll(seg.a.x, seg.a.y);
+      const bLL = m2ll(seg.b.x, seg.b.y);
+      const ia = g.addNodeFromLL(aLL.lon,aLL.lat);
+      const ib = g.addNodeFromLL(bLL.lon,bLL.lat);
+      const len = Math.hypot(seg.a.x-seg.b.x, seg.a.y-seg.b.y);
+      g.addEdge(ia,ib,len);
+    }
+    return g;
+  }
+  async function snapToNearestNode(g, lon, lat, maxSnapM=60){
+    const p = ll2m(lon,lat);
+    let best = {i:-1,d:Infinity};
+    for(let i=0;i<g.nodes.length;i++){
+      const n = g.nodes[i];
+      const d = Math.hypot(p.x-n.x,p.y-n.y);
+      if(d < best.d){ best = {i,d}; }
+    }
+    if(best.i>=0 && best.d<=maxSnapM) return best.i;
+    return best.i>=0 ? best.i : null;
+  }
+
+  // -------------------------
+  // Dijkstra（標高を使った上り罰則）
+  // -------------------------
+  class MinHeap{
+    constructor(){ this.a=[]; }
+    push(item){ this.a.push(item); this._up(this.a.length-1); }
+    _up(i){
+      while(i>0){
+        const p=(i-1)>>1;
+        if(this.a[p].d <= this.a[i].d) break;
+        [this.a[p],this.a[i]]=[this.a[i],this.a[p]];
+        i=p;
+      }
+    }
+    pop(){
+      if(!this.a.length) return null;
+      const top=this.a[0];
+      const last=this.a.pop();
+      if(this.a.length){
+        this.a[0]=last;
+        this._down(0);
+      }
+      return top;
+    }
+    _down(i){
+      for(;;){
+        const l=i*2+1, r=l+1;
+        let m=i;
+        if(l<this.a.length && this.a[l].d < this.a[m].d) m=l;
+        if(r<this.a.length && this.a[r].d < this.a[m].d) m=r;
+        if(m===i) break;
+        [this.a[m],this.a[i]]=[this.a[i],this.a[m]];
+        i=m;
+      }
+    }
+    get size(){ return this.a.length; }
+  }
+  async function dijkstraPath(g, start, goal, uphillPenalty, stopFn){
+    const n = g.nodes.length;
+    const dist = new Float64Array(n); dist.fill(Infinity);
+    const prev = new Int32Array(n); prev.fill(-1);
+    const heap = new MinHeap();
+    dist[start]=0;
+    heap.push({i:start,d:0});
+    let popped=0;
+
+    while(heap.size){
+      const cur = heap.pop();
+      if(!cur) break;
+      const u = cur.i;
+      if(cur.d !== dist[u]) continue;
+      popped++;
+      if(stopFn && stopFn()) return null;
+      if(u===goal) break;
+
+      const uNode = g.nodes[u];
+      const hu = await elevCached(uNode.lon,uNode.lat);
+
+      for(const e of g.adj[u]){
+        const v = e.to;
+        const vNode = g.nodes[v];
+        const hv = await elevCached(vNode.lon,vNode.lat);
+        let cost = e.lenM;
+        if(hu!=null && hv!=null){
+          const dh = hv - hu;
+          if(dh>0) cost += dh * uphillPenalty;
+        }
+        const nd = dist[u] + cost;
+        if(nd < dist[v]){
+          dist[v]=nd;
+          prev[v]=u;
+          heap.push({i:v,d:nd});
+        }
+      }
+    }
+
+    if(!isFinite(dist[goal])) return null;
+
+    const path=[];
+    for(let v=goal; v!==-1; v=prev[v]) path.push(v);
+    path.reverse();
+    return {path, cost: dist[goal], popped};
+  }
+
+  // -------------------------
+  // 停止判定（riverはwater gateを通す）
+  // -------------------------
+  function makeStopChecker(waterIdx, riverIdx, opts){
+    const gate = opts.riverGateWaterM;
+
+    return {
+      async checkPoint(lon,lat){
+        const stopMode = opts.stopMode;
+
+        if(stopMode !== "riverOnly"){
+          const near = waterIdx.containsOrNear(lon,lat,Math.max(50,opts.waterDbgRadiusM,gate));
+          if(near.hit || near.dist <= opts.waterSnapM){
+            return {stop:true, reason:`水域到達（${opts.waterLayer}）`, dist: near.hit?0:near.dist};
+          }
+        }
+
+        if(stopMode !== "waterOnly"){
+          const dRiver = riverIdx.nearestDistance(lon,lat,Math.max(opts.riverSnapM, 50));
+          if(dRiver <= opts.riverSnapM){
+            if(stopMode === "riverOnly"){
+              return {stop:true, reason:"河川中心線近接（riverOnly）", dist:dRiver};
+            }
+            const dWater = waterIdx.distanceToWater(lon,lat,Math.max(50,gate));
+            if(isFinite(dWater) && dWater <= gate){
+              return {stop:true, reason:`河川近接（ゲート通過：水域<=${gate}m）`, dist:dRiver, gateWater:dWater};
+            }
+          }
+        }
+
+        return {stop:false};
+      },
+
+      async clipSegmentAtRiver(p0,p1){
+        const hit = riverIdx.intersectSegment(p0,p1,Math.max(30,opts.riverSnapM));
+        if(!hit) return null;
+        if(hit.t <= 1e-6 || hit.t >= 1-1e-6) return null;
+
+        const ll = m2ll(hit.x, hit.y);
+        const stopMode = opts.stopMode;
+
+        if(stopMode === "waterOnly") return null;
+        if(stopMode === "riverOnly") return {lon:ll.lon, lat:ll.lat, reason:"河川横断（riverOnly）"};
+
+        const dWater = waterIdx.distanceToWater(ll.lon,ll.lat,Math.max(50,opts.riverGateWaterM));
+        if(isFinite(dWater) && dWater <= opts.riverGateWaterM){
+          return {lon:ll.lon, lat:ll.lat, reason:`河川横断（ゲート通過：水域<=${opts.riverGateWaterM}m）`, gateWater:dWater};
+        }
+        return null;
+      }
+    };
+  }
+
+  // -------------------------
+  // 目標ノード選定（autoは「river&waterゲート」優先）
+  // -------------------------
+  function pickTargetNode(g, startIdx, riverIdx, waterIdx, opts){
+    const start = g.nodes[startIdx];
+    const searchR = Math.max(800, opts.waterDbgRadiusM, opts.riverGateWaterM*5);
+
+    let bestRiverGated = {i:-1, score:Infinity, dRiver:Infinity, dWater:Infinity};
+    let bestWater = {i:-1, d:Infinity};
+    let bestRiver = {i:-1, d:Infinity};
+
+    for(let i=0;i<g.nodes.length;i++){
+      const n = g.nodes[i];
+      const d0 = haversineM({lon:start.lon,lat:start.lat},{lon:n.lon,lat:n.lat});
+      if(d0 > searchR*2) continue;
+
+      const dR = riverIdx.nearestDistance(n.lon,n.lat,Math.max(opts.riverSnapM,50));
+      if(dR < bestRiver.d) bestRiver = {i, d:dR};
+
+      const dW = waterIdx.distanceToWater(n.lon,n.lat,Math.max(50,opts.riverGateWaterM,opts.waterDbgRadiusM));
+      if(dW < bestWater.d) bestWater = {i, d:dW};
+
+      if(opts.stopMode !== "waterOnly"){
+        if(dR <= opts.riverSnapM && isFinite(dW) && dW <= opts.riverGateWaterM){
+          const score = dR + dW*2 + d0*0.001;
+          if(score < bestRiverGated.score){
+            bestRiverGated = {i, score, dRiver:dR, dWater:dW};
+          }
+        }
+      }
+    }
+
+    if(opts.stopMode === "riverOnly"){
+      return bestRiver.i>=0 ? {i:bestRiver.i, why:`riverOnly：河川最近傍 d=${bestRiver.d.toFixed(1)}m`} : null;
+    }
+    if(opts.stopMode === "waterOnly"){
+      return bestWater.i>=0 ? {i:bestWater.i, why:`waterOnly：水域最近傍 d=${bestWater.d.toFixed(1)}m`} : null;
+    }
+    if(bestRiverGated.i>=0){
+      return {i:bestRiverGated.i, why:`auto：河川(ゲート) dRiver=${bestRiverGated.dRiver.toFixed(1)}m / dWater=${bestRiverGated.dWater.toFixed(1)}m`};
+    }
+    if(bestWater.i>=0){
+      return {i:bestWater.i, why:`auto：水域フォールバック dWater=${bestWater.d.toFixed(1)}m`};
+    }
+    if(bestRiver.i>=0){
+      return {i:bestRiver.i, why:`auto：河川フォールバック dRiver=${bestRiver.d.toFixed(1)}m`};
+    }
+    return null;
+  }
+
+  // -------------------------
+  // Google Maps 描画
+  // -------------------------
+  function clearOverlays(){
+    if(st.startMarker){ st.startMarker.setMap(null); st.startMarker=null; }
+    if(st.endMarker){ st.endMarker.setMap(null); st.endMarker=null; }
+    if(st.polyline){ st.polyline.setMap(null); st.polyline=null; }
+    for(const p of st.dbgPolys){ p.setMap(null); }
+    for(const r of st.dbgBBoxes){ r.setMap(null); }
+    st.dbgPolys=[]; st.dbgBBoxes=[];
+  }
+
+  function drawStartMarker(startLL){
+    if(st.startMarker) st.startMarker.setMap(null);
+    st.startMarker = new google.maps.Marker({
+      position:{lat:startLL.lat,lng:startLL.lon},
+      map: st.map,
+      label: {text:"S", color:"#fff"},
+      title: "Start"
+    });
+  }
+
+  function drawEndMarker(endLL){
+    if(st.endMarker) st.endMarker.setMap(null);
+    st.endMarker = new google.maps.Marker({
+      position:{lat:endLL.lat,lng:endLL.lon},
+      map: st.map,
+      label: {text:"E", color:"#fff"},
+      title: "End"
+    });
+  }
+
+  function drawPolyline(points){
+    if(st.polyline) st.polyline.setMap(null);
+    st.polyline = new google.maps.Polyline({
+      path: points.map(p=>({lng:p.lon, lat:p.lat})),
+      strokeColor: "#00e5ff",
+      strokeOpacity: 0.9,
+      strokeWeight: 4,
+      geodesic: true,
+    });
+    st.polyline.setMap(st.map);
+  }
+
+  function drawDbgWater(waterIdx, lon, lat, opts){
+    if(opts.waterDbg==="OFF") return;
+    for(const p of st.dbgPolys){ p.setMap(null); }
+    for(const r of st.dbgBBoxes){ r.setMap(null); }
+    st.dbgPolys=[]; st.dbgBBoxes=[];
+
+    const p = ll2m(lon,lat);
+    const q = {minx:p.x-opts.waterDbgRadiusM, miny:p.y-opts.waterDbgRadiusM, maxx:p.x+opts.waterDbgRadiusM, maxy:p.y+opts.waterDbgRadiusM};
+    let drawn=0;
+
+    for(const v of waterIdx.tileCache.values()){
+      if(!v || !v.grid) continue;
+      const cands = v.grid.queryBBox(q);
+      for(const it of cands){
+        if(drawn>=opts.waterDbgMaxDraw) break;
+        const poly = it.payload;
+        if(opts.waterDbg==="BBOX"){
+          const b = it.bbox;
+          const sw = m2ll(b.minx,b.miny);
+          const ne = m2ll(b.maxx,b.maxy);
+          const rect = new google.maps.Rectangle({
+            bounds:{south:sw.lat, west:sw.lon, north:ne.lat, east:ne.lon},
+            strokeColor:"#ffcc00",strokeOpacity:.7,strokeWeight:1,
+            fillOpacity:0
+          });
+          rect.setMap(st.map);
+          st.dbgBBoxes.push(rect);
+          drawn++;
+        }else if(opts.waterDbg==="POLY"){
+          const path = poly.outer.map(m=>m2ll(m.x,m.y)).map(ll=>({lng:ll.lon, lat:ll.lat}));
+          const pg = new google.maps.Polygon({
+            paths: path,
+            strokeColor:"#4ade80", strokeOpacity:.55, strokeWeight:1,
+            fillColor:"#4ade80", fillOpacity:.10
+          });
+          pg.setMap(st.map);
+          st.dbgPolys.push(pg);
+          drawn++;
+        }
+      }
+      if(drawn>=opts.waterDbgMaxDraw) break;
+    }
+  }
+
+  // -------------------------
+  // メイン：経路計算（002.htmlロジック維持）
+  // -------------------------
+  async function runFlow(startLL){
+    const opts = readOpts();
+    clearLog();
+    st.stopRequested = false;
+
+    setBusy(true, "準備中…", "依存モジュール（MVTデコード）読込中");
+    const depsOK = await loadMvtDeps();
+    if(!depsOK){
+      setBusy(false, "NG", "依存モジュールが読めません");
+      return;
+    }
+
+    log(`起点: ${startLL.lat.toFixed(6)}, ${startLL.lon.toFixed(6)}`);
+    log(`計算を開始します…`);
+
+    const waterIdx = new WaterIndex();
+    const rdIdx = new LineIndex(180);
+    const rvIdx = new LineIndex(220);
+    const stop = makeStopChecker(waterIdx, rvIdx, opts);
+
+    setBusy(true, "計算中…", "水域タイル読み込み中");
+    await waterIdx.ensureTilesAround(startLL.lon,startLL.lat, opts.waterZ, 1, opts.waterLayer);
+
+    const zLine = 16;
+    let final = null;
+
+    for(let r=opts.tileRadius; r<=opts.maxTileRadius; r++){
+      if(st.stopRequested) return;
+
+      setBusy(true, "計算中…", `道路/河川タイル読み込み中（半径 ${r}）`);
+      logH(`グラフ構築: z=${zLine} 半径=${r}（${2*r+1}×${2*r+1}）`);
+
+      await rdIdx.ensureTilesAround(startLL.lon,startLL.lat, zLine, r, "experimental_rdcl");
+      await rvIdx.ensureTilesAround(startLL.lon,startLL.lat, zLine, r, "experimental_rvrcl");
+
+      const waterRadius = Math.max(1, Math.ceil(r * Math.pow(2,opts.waterZ) / Math.pow(2,zLine)));
+      await waterIdx.ensureTilesAround(startLL.lon,startLL.lat, opts.waterZ, waterRadius, opts.waterLayer);
+
+      log(`道路: tiles=${rdIdx.loadedTiles} segs=${rdIdx.loadedSegs}（OK=${rdIdx.fetchOk} NG=${rdIdx.fetchFail}）`);
+      log(`河川: tiles=${rvIdx.loadedTiles} segs=${rvIdx.loadedSegs}（OK=${rvIdx.fetchOk} NG=${rvIdx.fetchFail}）`);
+      log(`水域: tiles=${waterIdx.loadedTiles} polys=${waterIdx.loadedPolys}（OK=${waterIdx.fetchOk} decodeOK=${waterIdx.decodeOk}）`);
+
+      setBusy(true, "計算中…", "道路グラフ構築中");
+      const g = buildRoadGraphFromLineIndex(rdIdx);
+      log(`グラフ: nodes=${g.nodes.length}, edges~=${rdIdx.segs.length}`);
+
+      const sIdx = await snapToNearestNode(g, startLL.lon, startLL.lat, 80);
+      if(sIdx==null){
+        log(`ERROR: 起点のスナップに失敗`);
+        continue;
+      }
+      const sNode = g.nodes[sIdx];
+      log(`起点スナップ: node=${sIdx} @ ${sNode.lat.toFixed(6)},${sNode.lon.toFixed(6)}`);
+
+      setBusy(true, "計算中…", "目標地点（河川/水域）探索中");
+      const target = pickTargetNode(g, sIdx, rvIdx, waterIdx, opts);
+      if(!target){
+        log(`目標地点が見つかりません（半径 ${r}）`);
+        continue;
+      }
+      log(`目標: node=${target.i}（${target.why}）`);
+
+      setBusy(true, "計算中…", "Dijkstra（最短経路）計算中");
+      const dj = await dijkstraPath(g, sIdx, target.i, opts.uphillPenalty, ()=>st.stopRequested);
+      if(!dj){
+        log(`Dijkstra 失敗/中断`);
+        continue;
+      }
+      log(`Dijkstra: popped=${dj.popped}, cost=${dj.cost.toFixed(1)}`);
+
+      const pts = dj.path.map(i=>({lon:g.nodes[i].lon, lat:g.nodes[i].lat}));
+
+      logH(`追跡開始: steps<=${opts.maxSteps}`);
+      setBusy(true, "計算中…", "経路追跡（停止判定）中");
+
+      const traced = [];
+      let stopInfo = null;
+
+      for(let i=0; i<pts.length && i<opts.maxSteps; i++){
+        if(st.stopRequested) break;
+        const cur = pts[i];
+
+        await waterIdx.ensureTilesAround(cur.lon,cur.lat, opts.waterZ, 1, opts.waterLayer);
+
+        if(i===0 || i===pts.length-1 || (opts.waterLog==="all" && (i%20===0))){
+          drawDbgWater(waterIdx, cur.lon, cur.lat, opts);
+        }
+
+        const chk = await stop.checkPoint(cur.lon,cur.lat);
+        if(opts.waterLog!=="off"){
+          if(opts.waterLog==="all"){
+            log(`step=${i} stop=${chk.stop?1:0} ${chk.reason||""} ${chk.dist!=null?`d=${chk.dist.toFixed(1)}m`:""}`);
+          }else if(opts.waterLog==="stopOnly" && chk.stop){
+            log(`STOP@step=${i}: ${chk.reason} ${chk.dist!=null?`d=${chk.dist.toFixed(1)}m`:""} ${chk.gateWater!=null?`gateWater=${chk.gateWater.toFixed(1)}m`:""}`);
+          }
+        }
+
+        traced.push(cur);
+
+        if(chk.stop){
+          stopInfo = {at:cur, ...chk};
+          break;
+        }
+
+        if(i+1 < pts.length){
+          const nxt = pts[i+1];
+          const clip = await stop.clipSegmentAtRiver(cur,nxt);
+          if(clip){
+            traced.push({lon:clip.lon, lat:clip.lat});
+            stopInfo = {at:{lon:clip.lon,lat:clip.lat}, stop:true, reason:clip.reason, gateWater:clip.gateWater};
+            log(`CLIP STOP: ${clip.reason} ${clip.gateWater!=null?`gateWater=${clip.gateWater.toFixed(1)}m`:""}`);
+            break;
+          }
+        }
+      }
+
+      final = {traced, stopInfo, waterIdx, rdIdx, rvIdx};
+      break;
+    }
+
+    if(!final){
+      setBusy(false);
+      log(`\n結果: 経路生成できませんでした（道路/河川タイル半径（最大）を上げてください）`);
+      return;
+    }
+
+    const end = final.traced[final.traced.length-1];
+    drawPolyline(final.traced);
+    drawEndMarker({lat:end.lat, lon:end.lon});
+
+    const h0 = await elevCached(startLL.lon,startLL.lat);
+    const h1 = await elevCached(end.lon,end.lat);
+    if(h0!=null && h1!=null){
+      log(`\n標高: ${h0.toFixed(2)}m → ${h1.toFixed(2)}m （Δ=${(h1-h0).toFixed(2)}m）`);
+    }else{
+      log(`\n標高: 取得失敗（該当タイル未整備の可能性）`);
+    }
+
+    if(final.stopInfo){
+      log(`\n停止: ${final.stopInfo.reason}`);
+      if(final.stopInfo.dist!=null) log(`  距離=${final.stopInfo.dist.toFixed(1)}m`);
+      if(final.stopInfo.gateWater!=null) log(`  ゲート水域距離=${final.stopInfo.gateWater.toFixed(1)}m`);
+    }else{
+      log(`\n停止: 未検出（maxSteps不足 or 目標が遠い）`);
+    }
+
+    log(`\n水域統計: tiles=${final.waterIdx.loadedTiles} polys=${final.waterIdx.loadedPolys} bytes=${(final.waterIdx.bytes/1024).toFixed(1)}KB OK=${final.waterIdx.fetchOk} NG=${final.waterIdx.fetchFail} decodeOK=${final.waterIdx.decodeOk} decodeNG=${final.waterIdx.decodeFail}`);
+    log(`道路統計: tiles=${final.rdIdx.loadedTiles} segs=${final.rdIdx.loadedSegs} OK=${final.rdIdx.fetchOk} NG=${final.rdIdx.fetchFail}`);
+    log(`河川統計: tiles=${final.rvIdx.loadedTiles} segs=${final.rvIdx.loadedSegs} OK=${final.rvIdx.fetchOk} NG=${final.rvIdx.fetchFail}`);
+
+    log(`\n完了`);
+    setBusy(false, "完了", "経路を表示しました");
+  }
+
+  // -------------------------
+  // ボタン
+  // -------------------------
+  btnArm.addEventListener("click", ()=>{
+    if(!st.mapLoaded || st.computing) return;
+    st.armed = !st.armed;
+    btnArm.textContent = st.armed ? "地図をタップして起点指定…" : "起点クリック→経路計算";
+    log(st.armed ? "モード: ON（地図をクリックして起点指定）" : "モード: OFF");
+  });
+
+  btnClear.addEventListener("click", ()=>{
+    if(st.computing) return;
+    clearOverlays();
+    clearLog();
+    setCalcState("待機中");
+    log("クリア");
+  });
+
+  btnStop.addEventListener("click", ()=>{
+    st.stopRequested = true;
+    log("停止要求");
+    setBusy(false, "停止", "ユーザー操作で停止しました");
+  });
+
+  // -------------------------
+  // 起動：地図ロード（tilesloadedで表示確定）
+  // -------------------------
+  (async ()=>{
+    try{
+      const key = (window.GMAPS_API_KEY || "").trim();
+      if(!key || key.startsWith("AIza...") || key === "YOUR_GOOGLE_MAPS_API_KEY_HERE"){
+        setMapState("NG（キー未設定）");
+        showOverlay(true, "APIキーが未設定です", "HTML内の window.GMAPS_API_KEY をあなたのキーに置換してください。", "");
+        return;
+      }
+
+      setMapState("読込中…");
+      setCalcState("待機中");
+      showOverlay(true, "地図を読み込み中…", "Google Maps を初期化しています。", "Network: maps/api/js 200 / Console: Google Maps JavaScript API error: xxxx");
+
+      await loadGoogleMaps(key);
+      log("Maps script OK / init開始");
+
+      st.map = new google.maps.Map($("map"),{
+        center:{lat:35.6809591,lng:139.7673068},
+        zoom: 14,
+        mapTypeId: "roadmap",
+        streetViewControl: false,
+        fullscreenControl: false,
+        mapTypeControl: true,
+        mapTypeControlOptions:{position:google.maps.ControlPosition.TOP_CENTER}
+      });
+
+      let shown = false;
+      google.maps.event.addListenerOnce(st.map, "tilesloaded", ()=>{
+        shown = true;
+        st.mapLoaded = true;
+        setMapState("OK（表示）");
+        showOverlay(false);
+        btnArm.disabled = false;
+        btnClear.disabled = false;
+        btnStop.disabled = false;
+        log("tilesloaded: 表示OK");
+      });
+
+      // 10秒待って tilesloaded が来ない場合：Google拒否/ブロックを疑ってNG表示
+      setTimeout(()=>{
+        if(shown) return;
+        if(detectGoogleErrorOverlayText()){
+          setMapState("NG（Google側拒否）");
+          showOverlay(true, "Google Maps が表示できません", "地図領域に Google のエラーオーバーレイが検出されました。\n左ログ/Consoleのエラー名に従って修正してください。", "最頻原因：HTTPリファラ未許可 / Billing未有効 / API未有効 / ブロッカー");
+          log("Googleエラーオーバーレイ検出");
+        }else{
+          setMapState("表示遅延");
+          showOverlay(true, "地図の表示が遅れています", "Networkで maps/api/js が 200 か、Consoleにエラー名が出ていないか確認してください。", "");
+          log("tilesloaded未到達（表示遅延）");
+        }
+      }, 10000);
+
+      // 地図クリック：モードONなら、S即表示→計算
+      st.map.addListener("click", async (e)=>{
+        if(!st.armed || st.computing || !st.mapLoaded) return;
+
+        st.armed = false;
+        btnArm.textContent = "起点クリック→経路計算";
+
+        const startLL = {lat:e.latLng.lat(), lon:e.latLng.lng()};
+        st.lastStart = startLL;
+
+        clearOverlays();
+        drawStartMarker(startLL);      // ★即表示
+        setBusy(true, "計算準備中…", "起点表示 → 計算開始");
+        await new Promise(r=>setTimeout(r,0)); // 描画を先に通す
+
+        try{
+          await runFlow(startLL);
+        }catch(err){
+          log("計算エラー: " + (err?.message || String(err)));
+          setBusy(false, "NG", "計算失敗");
+        }finally{
+          if(st.computing) setBusy(false);
+        }
+      });
+
+      log("準備完了：ボタンでモードON→地図クリック");
+    }catch(err){
+      setMapState("NG");
+      showOverlay(true, "地図の読み込みに失敗", (err?.message || String(err)) + "\n\n候補：\n・広告ブロッカー/ネットワーク遮断\n・キー不正/無効\n・CSP", "");
+      log("Mapsロード失敗: " + (err?.message || String(err)));
+      alert(err?.message || String(err));
+    }
+  })();
+</script>
+</body>
+</html>

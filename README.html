@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>雨水フロー追跡（river/waterarea停止 統合版）｜説明書</title>
+  <style>
+    :root {
+      --bg:#0b0f14; --panel:#101826; --text:#e6eefc; --muted:#a6b2c7;
+      --line:#1f2a3d; --accent:#7aa2ff; --warn:#ffcc66; --bad:#ff6b6b;
+      --ok:#6ee7b7; --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    }
+    html,body { background:var(--bg); color:var(--text); font-family:var(--sans); margin:0; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    header { padding:24px 18px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(122,162,255,0.14), rgba(0,0,0,0)); }
+    h1 { margin:0 0 6px; font-size:20px; }
+    .meta { color:var(--muted); font-size:12px; line-height:1.5; }
+    .wrap { display:grid; grid-template-columns: 260px 1fr; gap:16px; padding:16px; max-width:1200px; margin:0 auto; }
+    nav { position:sticky; top:12px; align-self:start; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px; }
+    nav h2 { font-size:13px; margin:0 0 8px; color:var(--muted); }
+    nav a { display:block; padding:7px 8px; border-radius:8px; font-size:13px; color:var(--text); }
+    nav a:hover { background:rgba(122,162,255,0.12); }
+    main { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+    section { border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+    section:first-child { border-top:none; padding-top:0; margin-top:0; }
+    h2 { font-size:16px; margin:0 0 10px; }
+    h3 { font-size:14px; margin:12px 0 8px; color:var(--text); }
+    p,li { color:var(--text); font-size:13px; line-height:1.7; }
+    ul { margin:8px 0 8px 20px; }
+    code, .mono { font-family:var(--mono); font-size:12px; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:12px; }
+    .callout {
+      border:1px solid var(--line); background:rgba(255,255,255,0.03);
+      border-left:4px solid var(--accent); padding:10px 12px; border-radius:10px; margin:10px 0;
+    }
+    .warn { border-left-color:var(--warn); }
+    .bad { border-left-color:var(--bad); }
+    .ok { border-left-color:var(--ok); }
+    table { width:100%; border-collapse:collapse; overflow:hidden; border:1px solid var(--line); border-radius:10px; }
+    th,td { border-bottom:1px solid var(--line); padding:10px 10px; vertical-align:top; }
+    th { text-align:left; font-size:12px; color:var(--muted); background:rgba(255,255,255,0.02); }
+    tr:last-child td { border-bottom:none; }
+    .k { color:var(--muted); width:140px; }
+    .small { font-size:12px; color:var(--muted); }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    @media (max-width: 920px) {
+      .wrap { grid-template-columns:1fr; }
+      nav { position:relative; top:auto; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div style="max-width:1200px;margin:0 auto;">
+    <h1>雨水フロー追跡（river/waterarea停止 統合版）｜説明書</h1>
+    <div class="meta">
+      生成日: <span class="mono">2026-01-29</span> ／ 対象ファイル: <span class="mono">index.html</span> ／ SHA-256: <span class="mono">f79327a340202720e38601a830aeb1d153c664cf7fee361777a10213e5b8fccb</span><br/>
+      この説明書は、アップロードされた <span class="mono">index.html</span> の実装内容（関数 <span class="mono">runFlow</span> / <span class="mono">WaterIndex</span> / <span class="mono">LineIndex</span> / <span class="mono">dijkstraPath</span> 等）を読み取り、データ出典（一次情報）を付して整理したものです。
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav>
+    <h2>目次</h2>
+    <a href="#overview">1. 概要</a>
+    <a href="#quickstart">2. 使い方（最短）</a>
+    <a href="#logic">3. ロジック（経路算定の仕組み）</a>
+    <a href="#datasources">4. 使用データと出典</a>
+    <a href="#params">5. パラメータ一覧</a>
+    <a href="#notes">6. 注意事項（精度・免責・運用）</a>
+    <a href="#trouble">7. つまずきポイント（トラブルシュート）</a>
+    <a href="#limits">8. 既知の制限と改善案</a>
+    <a href="#search">9. 使用検索語（再現性）</a>
+  </nav>
+
+  <main>
+    <section id="overview">
+      <h2>1. 概要</h2>
+      <p>
+        本ソフトは、Google Maps 上で起点をクリックすると、起点周辺の <b>道路中心線</b>（GeoJSONタイル）をグラフ化し、
+        <b>標高タイル</b>を用いて「上りを避ける」コストで経路を探索し、<b>水域面（waterarea）</b>または <b>河川中心線</b>に到達した地点で停止させる 1HTML アプリです。
+      </p>
+      <div class="callout warn">
+        <b>重要：</b>本ソフトは「実際の雨水排水（側溝・暗渠・下水・地形流向）」を厳密に再現するものではありません。<br/>
+        現行実装は「道路中心線ネットワーク上の経路探索」であり、地形の流向解析（D8等）は行っていません。
+      </div>
+
+      <h3>主な構成</h3>
+      <ul>
+        <li>ベース地図表示：Google Maps JavaScript API（表示・クリックUIのみ）</li>
+        <li>道路中心線：<code>experimental_rdcl</code>（ズーム16の GeoJSON タイル）</li>
+        <li>河川中心線：<code>experimental_rvrcl</code>（ズーム16の GeoJSON タイル）</li>
+        <li>水域面：<code>experimental_bvmap</code>（MVT/PBF の <code>waterarea</code> などのポリゴンレイヤ）</li>
+        <li>標高：PNG標高タイル（<code>dem1a_png</code> ほか、z=15→14の順で取得）</li>
+      </ul>
+    </section>
+
+    <section id="quickstart">
+      <h2>2. 使い方（最短）</h2>
+      <ol>
+        <li><b>HTTPSで開く</b>：Cloudflare Pages など <span class="mono">https://</span> のURLで開いてください（<span class="mono">file://</span> 直開きだと <span class="mono">import()</span> がブロックされます）。</li>
+        <li><b>Google Maps API キー</b>をHTMLに設定し、Google Cloud 側で <b>HTTP referrer 制限</b>と <b>Maps JavaScript API のみ許可</b>を設定します。</li>
+        <li>画面左の「起点クリック（モードON）」を押す → 地図上をクリック。</li>
+        <li>ログに「起点標高」「グラフ再構築」「経路計算」を出し、経路が青線で描画されます。</li>
+        <li>停止点（水域面/河川）に到達すると、停止理由がログに出ます。</li>
+      </ol>
+
+      <div class="callout ok">
+        <b>よく使う設定（推奨）</b><br/>
+        <span class="pill">stopMode=auto</span>
+        <span class="pill">waterLayer=waterarea</span>
+        <span class="pill">waterZ=14</span>
+        <span class="pill">riverSnapM=30</span>
+        <span class="pill">riverGateWaterM=20</span>
+        <span class="pill">uphillPenalty=15</span>
+      </div>
+    </section>
+
+    <section id="logic">
+      <h2>3. ロジック（経路算定の仕組み）</h2>
+
+      <h3>3.1 入力→計算の全体フロー（runFlow）</h3>
+      <table>
+        <thead><tr><th style="width:70px;">順</th><th>処理</th><th>内部の要点</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>起点クリック</td><td>クリックした経緯度（lon/lat）を起点として計算開始。</td></tr>
+          <tr><td>2</td><td>タイル取得（道路/河川/水域）</td><td>
+            <code>experimental_rdcl</code>, <code>experimental_rvrcl</code> を起点周辺で取得（半径 <code>tileRadius</code>）。<br/>
+            水域は <code>experimental_bvmap</code> のPBFを <code>waterZ</code> で取得し、指定レイヤ（既定 <code>waterarea</code>）のポリゴンを抽出。
+          </td></tr>
+          <tr><td>3</td><td>道路グラフ構築</td><td>
+            rdcl の LineString/MultiLineString を分解し、隣接点を辺（Edge）として登録。<br/>
+            ノードは座標（lon/lat）をそのままキー化して作成（交差点スナップの追加処理はなし）。
+          </td></tr>
+          <tr><td>4</td><td>起点スナップ</td><td>起点に最も近いノードを探索し、開始ノードに設定。</td></tr>
+          <tr><td>5</td><td>目標ノード選定（pickTargetNode）</td><td>
+            <b>auto</b>：水域面（優先）または河川中心線に最短距離のノードを候補に。<br/>
+            <b>waterOnly</b>：水域面のみ。<b>riverOnly</b>：河川中心線のみ。
+          </td></tr>
+          <tr><td>6</td><td>Dijkstra 探索（dijkstraPath）</td><td>
+            コスト：<code>edgeCost = 距離(m) + uphillPenalty × max(0, 標高差)</code><br/>
+            標高は PNG標高タイル（z=15→14、dem1a_png→dem5a_png→...）で取得し、エッジ両端の標高差で加算。
+          </td></tr>
+          <tr><td>7</td><td>停止判定しながらトレース</td><td>
+            経路ノード列を順に辿り、<code>maxSteps</code> 以内で停止条件を満たしたら停止。<br/>
+            <b>水域停止</b>：ポリゴン内ヒット（＋近傍許容 <code>waterSnapM</code>）。<br/>
+            <b>河川停止</b>：<code>riverSnapM</code>以内 かつ <code>riverGateWaterM</code>以内に水域面が存在（誤停止抑制）。
+          </td></tr>
+        </tbody>
+      </table>
+
+      <h3>3.2 標高の取得（PNG標高タイル）</h3>
+      <div class="callout">
+        取得順：<code>z=15</code> → <code>z=14</code> の順、各ズームで <code>dem1a_png</code> → <code>dem5a_png</code> → <code>dem5b_png</code> → <code>dem5c_png</code> → <code>dem10b_png</code> の順でフォールバックします。<br/>
+        RGB→標高の変換は、国土地理院の仕様（0.01m単位、無効値 128,0,0）に従います。
+      </div>
+
+      <h3>3.3 停止条件（誤停止対策）</h3>
+      <ul>
+        <li><b>水域面で停止</b>：<code>waterLayer=waterarea</code> のポリゴン内に入った時点で停止（<code>waterSnapM</code>で近傍許容）。</li>
+        <li><b>河川中心線で停止</b>：単に河川中心線に近いだけだと、用水路/誤差等で止まりやすいので、<code>riverGateWaterM</code>で「水域面が近くにある河川」だけを停止対象にします。</li>
+        <li><b>線分交差での停止</b>：経路線分が河川中心線と交差した場合、交点で停止（ただし水域ゲート条件を満たす場合）。</li>
+      </ul>
+
+      <div class="callout warn">
+        <b>“川まで届かない”典型要因：</b><br/>
+        (1) <code>maxSteps</code> が小さい／(2) 目標ノード選定が近傍の水域/河川を拾えていない／(3) ゲート条件が厳しすぎる（<code>riverGateWaterM</code>小）／(4) 水域面のズームやタイル範囲不足。<br/>
+        対処は「7. トラブルシュート」「5. パラメータ」を参照。
+      </div>
+    </section>
+
+    <section id="datasources">
+      <h2>4. 使用データと出典</h2>
+
+      <h3>4.1 本ソフトが参照するURL（テンプレ）</h3>
+      <table>
+        <thead><tr><th>用途</th><th>URLテンプレ</th><th>備考</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>道路中心線（GeoJSON）</td>
+            <td class="mono">https://cyberjapandata.gsi.go.jp/xyz/experimental_rdcl/&lbrace;z&rbrace;/&lbrace;x&rbrace;/&lbrace;y&rbrace;.geojson</td>
+            <td>z=16固定（提供実験）</td>
+          </tr>
+          <tr>
+            <td>河川中心線（GeoJSON）</td>
+            <td class="mono">https://cyberjapandata.gsi.go.jp/xyz/experimental_rvrcl/&lbrace;z&rbrace;/&lbrace;x&rbrace;/&lbrace;y&rbrace;.geojson</td>
+            <td>z=16固定（提供実験）</td>
+          </tr>
+          <tr>
+            <td>水域面（MVT/PBF）</td>
+            <td class="mono">https://cyberjapandata.gsi.go.jp/xyz/experimental_bvmap/&lbrace;z&rbrace;/&lbrace;x&rbrace;/&lbrace;y&rbrace;.pbf</td>
+            <td>レイヤ名は <code>waterarea</code> 等（提供実験）</td>
+          </tr>
+          <tr>
+            <td>標高（PNG）</td>
+            <td class="mono">https://cyberjapandata.gsi.go.jp/xyz/&lbrace;layer&rbrace;/&lbrace;z&rbrace;/&lbrace;x&rbrace;/&lbrace;y&rbrace;.png</td>
+            <td><code>layer</code>は dem1a_png 等</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>4.2 出典（一次情報）</h3>
+      <table>
+        <thead><tr><th>資料名</th><th>URL</th><th>発行日/更新日（明記がある場合）</th></tr></thead>
+        <tbody>
+          
+    <tr>
+      <td>国土地理院 標高タイル（PNG標高タイル：RGB→標高値の算出）</td>
+      <td><a href="https://maps.gsi.go.jp/development/demtile.html" target="_blank" rel="noreferrer">https://maps.gsi.go.jp/development/demtile.html</a></td>
+      <td>発行日記載なし（閲覧日: 2026-01-29）</td>
+    </tr>
+    
+    <tr>
+      <td>国土地理院 地理院タイル一覧（タイル提供と出典明示の考え方）</td>
+      <td><a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noreferrer">https://maps.gsi.go.jp/development/ichiran.html</a></td>
+      <td>発行日記載なし（閲覧日: 2026-01-29）</td>
+    </tr>
+    
+    <tr>
+      <td>国土地理院ベクトルタイル提供実験（GeoJSONタイル：道路中心線/河川中心線 等）</td>
+      <td><a href="https://github.com/gsi-cyberjapan/vector-tile-experiment" target="_blank" rel="noreferrer">https://github.com/gsi-cyberjapan/vector-tile-experiment</a></td>
+      <td>提供開始: 2015-08-03（全国） ※README記載</td>
+    </tr>
+    
+    <tr>
+      <td>experimental_rdcl（道路中心線 GeoJSONタイル）</td>
+      <td><a href="https://github.com/gsi-cyberjapan/experimental_rdcl" target="_blank" rel="noreferrer">https://github.com/gsi-cyberjapan/experimental_rdcl</a></td>
+      <td>提供実験期間: 2014-08-01〜（README記載）</td>
+    </tr>
+    
+    <tr>
+      <td>experimental_rvrcl（河川中心線 GeoJSONタイル）</td>
+      <td><a href="https://github.com/gsi-cyberjapan/experimental_rvrcl" target="_blank" rel="noreferrer">https://github.com/gsi-cyberjapan/experimental_rvrcl</a></td>
+      <td>履歴: 2015-08-03（全国提供開始）※README記載</td>
+    </tr>
+    
+    <tr>
+      <td>地理院地図Vector提供実験（MVT/PBF: experimental_bvmap）</td>
+      <td><a href="https://github.com/gsi-cyberjapan/gsimaps-vector-experiment" target="_blank" rel="noreferrer">https://github.com/gsi-cyberjapan/gsimaps-vector-experiment</a></td>
+      <td>データ更新情報: 2025-10-01時点（README記載）</td>
+    </tr>
+    
+    <tr>
+      <td>地理院地図 利用規約（免責・利用条件の入口）</td>
+      <td><a href="https://maps.gsi.go.jp/help/termsofuse.html" target="_blank" rel="noreferrer">https://maps.gsi.go.jp/help/termsofuse.html</a></td>
+      <td>発行日記載なし（閲覧日: 2026-01-29）</td>
+    </tr>
+    
+    <tr>
+      <td>Google Maps Platform APIキーの制限ベストプラクティス</td>
+      <td><a href="https://developers.google.com/maps/api-security-best-practices" target="_blank" rel="noreferrer">https://developers.google.com/maps/api-security-best-practices</a></td>
+      <td>発行日記載なし（閲覧日: 2026-01-29）</td>
+    </tr>
+    
+    <tr>
+      <td>Maps JavaScript API エラーメッセージ一覧（RefererNotAllowed等）</td>
+      <td><a href="https://developers.google.com/maps/documentation/javascript/error-messages" target="_blank" rel="noreferrer">https://developers.google.com/maps/documentation/javascript/error-messages</a></td>
+      <td>発行日記載なし（閲覧日: 2026-01-29）</td>
+    </tr>
+    
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <b>提供実験データの扱い：</b>国土地理院のベクトルタイルは「提供実験中のデータであるため、URLやデータ構成が変わる可能性」が明記されています。運用時は、変更告知（例：公式アナウンス）を前提にしてください。
+      </div>
+    </section>
+
+    <section id="params">
+      <h2>5. パラメータ一覧</h2>
+      <p>画面左パネルの「パラメータ」に露出している項目の一覧です（既定値はHTMLの初期値）。</p>
+
+      <table>
+      <thead>
+        <tr>
+          <th style="width:220px;">パラメータ（表示名）</th>
+          <th style="width:110px;">既定値</th>
+          <th>意味</th>
+          <th style="width:320px;">選択肢</th>
+        </tr>
+      </thead>
+      <tbody>
+
+          <tr>
+            <td>
+              道路/河川タイル半径（初期）<br/>
+              <span class="small mono">tileRadius</span>
+            </td>
+            <td class="mono">1</td>
+            <td>道路中心線(rdcl)・河川中心線(rvrcl)タイルを起点周辺で読む初期半径（タイル枚数の半径）。1なら(2*1+1)^2=9枚。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              道路/河川タイル半径（最大）<br/>
+              <span class="small mono">maxTileRadius</span>
+            </td>
+            <td class="mono">3</td>
+            <td>上記の最大半径。現行コードは「経路が見つかった時点」で確定し、停止判定未検出でも半径拡張による再試行はしません（後述）。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              水域PBFズーム（water）<br/>
+              <span class="small mono">waterZ</span>
+            </td>
+            <td class="mono">14</td>
+            <td>水域面(MVT/PBF: experimental_bvmap)を読むズーム。大きいほど詳細だがタイル数/デコード負荷が増えます。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              水域レイヤー<br/>
+              <span class="small mono">waterLayer</span>
+            </td>
+            <td class="mono">waterarea</td>
+            <td>experimental_bvmap 内の参照レイヤ名。現行実装は「ポリゴン(type=3)」のみ抽出するため、線レイヤは0件になり得ます。</td>
+            <td><ul><li><code>waterarea</code>：waterarea（水面ポリゴン）</li><li><code>river</code>：river</li><li><code>lake</code>：lake</li><li><code>coastline</code>：coastline</li></ul></td>
+          </tr>
+          <tr>
+            <td>
+              水域停止距離（m）<br/>
+              <span class="small mono">waterSnapM</span>
+            </td>
+            <td class="mono">0</td>
+            <td>水域停止の“近傍許容(m)”。0なら「ポリゴン内に入った時のみ」停止（境界の誤差吸収をしたい場合は数m）。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              河川近接距離（m）<br/>
+              <span class="small mono">riverSnapM</span>
+            </td>
+            <td class="mono">30</td>
+            <td>河川中心線(rvrcl)に近づいたら停止と見なす距離(m)。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              河川停止ゲート（水域近傍m）<br/>
+              <span class="small mono">riverGateWaterM</span>
+            </td>
+            <td class="mono">20</td>
+            <td>河川停止を“水域面でゲート”する距離(m)。河川中心線に近くても、水域面(waterarea)が近傍になければ停止しない（誤停止抑制）。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              上り罰則（標高差×係数）<br/>
+              <span class="small mono">uphillPenalty</span>
+            </td>
+            <td class="mono">15</td>
+            <td>Dijkstraのコストに上り勾配（正の標高差）を加算する重み。大きいほど“下り優先”になります。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              最大ステップ数<br/>
+              <span class="small mono">maxSteps</span>
+            </td>
+            <td class="mono">2000</td>
+            <td>停止判定をしながら経路を辿る最大ステップ数。経路が長い場合、ここで打ち切られて「川まで到達しない」状態になります。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              停止モード<br/>
+              <span class="small mono">stopMode</span>
+            </td>
+            <td class="mono">auto</td>
+            <td>停止条件モード。auto=水域優先＋河川はゲート付き、水域面のみ、河川中心線のみ。</td>
+            <td><ul><li><code>auto</code>：auto（推奨：水域優先＋河川はゲート付き）</li><li><code>waterOnly</code>：水域面のみ（waterareaのみ）</li><li><code>riverOnly</code>：河川中心線のみ（rvrcl）</li></ul></td>
+          </tr>
+          <tr>
+            <td>
+              水域デバッグ描画<br/>
+              <span class="small mono">waterDbg</span>
+            </td>
+            <td class="mono">OFF</td>
+            <td>デバッグ描画。POLY=水域ポリゴン、BBOX=候補枠（端末が重い場合はOFF推奨）。</td>
+            <td><ul><li><code>OFF</code>：OFF</li><li><code>POLY</code>：POLY（水域面）</li><li><code>BBOX</code>：BBOX（候補枠）</li></ul></td>
+          </tr>
+          <tr>
+            <td>
+              水域デバッグ半径（m）<br/>
+              <span class="small mono">waterDbgRadiusM</span>
+            </td>
+            <td class="mono">800</td>
+            <td>デバッグ可視化の探索半径(m)。大きいほど候補が増えて重くなります。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              水域デバッグ最大描画数<br/>
+              <span class="small mono">waterDbgMaxDraw</span>
+            </td>
+            <td class="mono">200</td>
+            <td>デバッグ描画の最大件数。</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>
+              水域ログ<br/>
+              <span class="small mono">waterLog</span>
+            </td>
+            <td class="mono">stopOnly</td>
+            <td>ログの詳細度。毎ステップはログ量が増えて端末が重くなります。</td>
+            <td><ul><li><code>stopOnly</code>：止点のみ詳細</li><li><code>all</code>：毎ステップ</li><li><code>off</code>：OFF</li></ul></td>
+          </tr>
+      </tbody>
+    </table></table>
+
+      <h3>推奨調整例</h3>
+      <ul>
+        <li><b>川まで届かない</b>：まず <code>maxSteps</code> を増やす（例：2000→5000）。次に <code>riverGateWaterM</code> を少し緩める（20→40）。</li>
+        <li><b>川でない場所で止まる</b>：<code>riverGateWaterM</code> を大きくしすぎない／<code>stopMode=waterOnly</code>で水面ポリゴンに限定。</li>
+        <li><b>水域面に入っているのに止まらない</b>：<code>waterSnapM</code> を数m（例：5〜15）にする（境界誤差吸収）。</li>
+        <li><b>重い</b>：<code>tileRadius</code>を小さく、<code>waterDbg=OFF</code>、<code>waterLog=stopOnly</code>。</li>
+      </ul>
+    </section>
+
+    <section id="notes">
+      <h2>6. 注意事項（精度・免責・運用）</h2>
+
+      <h3>6.1 精度・用途の限界</h3>
+      <ul>
+        <li>道路中心線上の経路探索であり、側溝/暗渠/下水道網・敷地内の微地形・越流等はモデル化していません。</li>
+        <li>標高は地理院のDEMに基づきますが、解像度や欠損（無効値）・更新タイミングの影響を受けます。</li>
+        <li>提供実験データ（rdcl/rvrcl/bvmap）は、将来URLや属性が変更される可能性があります。</li>
+      </ul>
+
+      <h3>6.2 免責・利用条件</h3>
+      <div class="callout">
+        地理院タイルは「国土地理院コンテンツ利用規約」に従って利用する必要があります。<br/>
+        また地理院地図サービスには免責（損害について責任を負わない等）・負荷時のアクセス遮断等が明記されています。運用上はキャッシュ・過度な連続クリックの抑制を推奨します。
+      </div>
+
+      <h3>6.3 セキュリティ（APIキー）</h3>
+      <ul>
+        <li>Google Maps APIキーは <b>HTTP referrer 制限</b>（Pagesのドメイン許可）と <b>API制限</b>（Maps JavaScript APIのみ）を推奨します。</li>
+        <li>HTMLに埋め込む場合でも制限設定を前提にし、漏えい時はキーのローテーション手順を用意してください。</li>
+      </ul>
+    </section>
+
+    <section id="trouble">
+      <h2>7. つまずきポイント（トラブルシュート）</h2>
+      <table>
+        <thead><tr><th>症状</th><th>原因候補</th><th>対処</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>地図が「読込中」のまま／<span class="mono">RefererNotAllowedMapError</span></td>
+            <td>APIキーのHTTPリファラ許可にPagesのURLが入っていない</td>
+            <td>Google Cloud Consoleで「アプリケーションの制限（HTTP referrers）」に <span class="mono">https://&lt;your-site&gt;/*</span> を追加</td>
+          </tr>
+          <tr>
+            <td>「依存モジュールが読めません」</td>
+            <td>esm.sh の <span class="mono">import()</span> が失敗（広告ブロッカー/社内NW/HTTPSでない）</td>
+            <td>広告ブロッカー停止、社内NWの許可、必ずHTTPSで開く</td>
+          </tr>
+          <tr>
+            <td>「川まで到達しない」</td>
+            <td><span class="mono">maxSteps</span>不足／ゲート条件が厳しい／目標ノード選定不適</td>
+            <td><span class="mono">maxSteps</span>増、<span class="mono">riverGateWaterM</span>緩和、<span class="mono">stopMode</span>切替（waterOnly/riverOnly）</td>
+          </tr>
+          <tr>
+            <td>「川じゃない所で止まる」</td>
+            <td>河川中心線の近傍判定が広い／水域ゲートが緩すぎる</td>
+            <td><span class="mono">riverSnapM</span>を小さく、<span class="mono">riverGateWaterM</span>を適正化、<span class="mono">stopMode=waterOnly</span>で確認</td>
+          </tr>
+          <tr>
+            <td>動作が重い</td>
+            <td>タイル数・デバッグ描画・ログ量が多い</td>
+            <td><span class="mono">tileRadius</span>↓、<span class="mono">waterDbg=OFF</span>、<span class="mono">waterLog=stopOnly</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="limits">
+      <h2>8. 既知の制限と改善案</h2>
+      <h3>8.1 既知の制限（現行実装そのまま）</h3>
+      <ul>
+        <li><b>交差点でのノード統合がない</b>：rdclが交差で分割されていない箇所では、グラフが繋がらない可能性があります。</li>
+        <li><b>半径拡張の再試行が限定的</b>：現行は「経路が取れた時点」で確定し、停止未検出でも半径を上げて再探索しません。</li>
+        <li><b>“道路の無い敷地内”を横断するように見える</b>：道路中心線は線データなので、実際の地物（敷地境界/私道/非道路空間）制約は持ちません。</li>
+      </ul>
+
+      <h3>8.2 改善案（次の改修で入れると効く）</h3>
+      <ul>
+        <li>停止未検出の場合のみ、<code>tileRadius</code>を段階的に増やして再試行する（到達率向上）。</li>
+        <li>rdclノードを「座標の丸め（例：1e-6）」で統合し、交差点の連結性を向上。</li>
+        <li>水域面の候補タイルを経路沿いにも追随して追加ロード（現行は起点中心が主）。</li>
+        <li>DEM流向（D8等）を併用し、道路中心線に偏らない“地形流下”モードを追加。</li>
+      </ul>
+    </section>
+
+    <section id="search">
+      <h2>9. 使用検索語（再現性）</h2>
+      <ul>
+        <li class='mono'>国土地理院 標高タイル demtile RGB 仕様</li><li class='mono'>cyberjapandata experimental_rdcl GeoJSON</li><li class='mono'>cyberjapandata experimental_rvrcl GeoJSON</li><li class='mono'>experimental_bvmap waterarea pbf レイヤ</li><li class='mono'>Google Maps JavaScript API error RefererNotAllowedMapError</li><li class='mono'>Google Maps api security best practices restrict key HTTP referrers</li>
+      </ul>
+      <p class="small">
+        ※採用方針：一次情報（国土地理院、Google公式ドキュメント、公式GitHub）を優先し、個人ブログは仕様確認の主根拠には使用しません。
+      </p>
+    </section>
+
+    <section>
+      <h2>付録：この説明書を同梱する運用</h2>
+      <ul>
+        <li>本ファイル（説明書HTML）をアプリと同じディレクトリに置き、<code>README.html</code>として配布すると、社内教育が楽です。</li>
+        <li>Cloudflare Pages 配布時は、<code>/manual.html</code> として同一サイトで公開すると、APIキーのリファラ許可範囲内で閲覧できます。</li>
+      </ul>
+    </section>
+
+  </main>
+</div>
+</body>
+</html>
